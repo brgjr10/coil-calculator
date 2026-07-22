@@ -1,0 +1,1344 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Coil Calculator</title>
+</head>
+<body>
+<script src="chart.min.js"></script>
+<script>
+document.body.innerHTML = 'Loading...';
+
+// shim require if not available
+window.require = window.require || function(x) { return {}; };
+
+(function () {
+
+window.onerror = function(msg, url, line, col, error) {
+    document.body.innerHTML = '<pre style="color:red;padding:20px">Error: ' + msg + '\nLine: ' + line + '</pre>';
+    return true;
+};
+
+const sharedCalc = { MATS: {
+    ka1:{res:1.45, dens:7100, sh:460},ka:{res:1.39, dens:7100, sh:460},kd:{res:1.35, dens:7100, sh:460},
+    n20:{res:1.05, dens:8400, sh:450},n40:{res:1.09, dens:8400, sh:450},n60:{res:1.12, dens:8400, sh:450},n70:{res:1.14, dens:8400, sh:450},n80:{res:1.10, dens:8400, sh:450},n90:{res:1.18, dens:8400, sh:450},
+    ss304:{res:0.72, dens:8000, sh:500},ss316:{res:0.74, dens:8000, sh:500},ss316l:{res:0.75, dens:8000, sh:500},ss317l:{res:0.79, dens:8000, sh:500},ss321:{res:0.72, dens:8000, sh:500},ss430:{res:0.60, dens:8000, sh:500},ss904l:{res:0.95, dens:8000, sh:500},
+    au:{res:0.022, dens:19300, sh:129},ag:{res:0.016, dens:10490, sh:235},cu:{res:0.017, dens:8960, sh:385},
+    ti1:{res:0.42, dens:4500, sh:520},ti2:{res:0.44, dens:4500, sh:520},tie:{res:0.43, dens:4500, sh:520},
+    w:{res:0.056, dens:19300, sh:134},nio:{res:1.50, dens:8900, sh:440},
+    ni200lin:{res:0.085, dens:8900, sh:440},ni200:{res:0.085, dens:8900, sh:440},
+    nife30:{res:1.00, dens:8000, sh:500},dicodes:{res:1.00, dens:8000, sh:500},reactor:{res:1.02, dens:8000, sh:500},nife30stealth:{res:1.00, dens:8000, sh:500},
+    invar36:{res:0.80, dens:8000, sh:515},nidh:{res:1.10, dens:8900, sh:440},nft70:{res:1.20, dens:8000, sh:500},nft52:{res:1.25, dens:8000, sh:500},zr:{res:0.40, dens:6500, sh:278}
+} };
+
+const MATS = sharedCalc.MATS;
+
+// inline minimal functions
+function awgToMm(awg) {
+    const t = {16:1.291,18:1.024,20:0.812,22:0.644,24:0.511,26:0.405,28:0.321,30:0.255};
+    return t[awg] || 0.127*Math.pow(92,(36-awg)/39);
+}
+function getCoilMetrics(wire, innerDiameter, wraps, legLength, spacingFactor = 1.0){
+    // Improved helix length: arc length = N * sqrt((2πr)² + p²)
+    const meanRadius = (innerDiameter + wire) / 2;
+    const turnPitch = wire * spacingFactor;
+    const circumf = 2 * Math.PI * meanRadius;
+    // More accurate helix arc length
+    const turnLength = Math.sqrt(circumf * circumf + turnPitch * turnPitch);
+    const totalLength = turnLength * wraps + Math.max(legLength, 0);
+    const crossSectionArea = Math.PI * Math.pow(wire / 2, 2);
+    const surfaceArea = Math.PI * wire * totalLength;
+    const coilWidth = wraps * turnPitch;
+    return { totalLength, crossSectionArea, surfaceArea, coilWidth, turnPitch };
+}
+const TCR = {
+    n80: 0.00017,
+    n20: 0.00017,
+    n40: 0.00017,
+    n60: 0.00017,
+    n70: 0.00017,
+    n90: 0.00017,
+    ka1: 0.00014,
+    ka: 0.00014,
+    kd: 0.00014,
+    ss304: 0.00080,
+    ss316: 0.00080,
+    ss316l: 0.00092,
+    ss317l: 0.00080,
+    ss321: 0.00080,
+    ss430: 0.00100,
+    ss904l: 0.00070,
+    au: 0.00340,
+    ag: 0.00380,
+    cu: 0.00393,
+    ti1: 0.00280,
+    ti2: 0.00280,
+    tie: 0.00280,
+    w: 0.00450,
+    nio: 0.00060,
+    ni200lin: 0.00600,
+    ni200: 0.00600,
+    nife30: 0.00120,
+    dicodes: 0.00120,
+    reactor: 0.00120,
+    nife30stealth: 0.00120,
+    invar36: 0.00150,
+    nidh: 0.00550,
+    nft70: 0.00035,
+    nft52: 0.00040,
+    zr: 0.00044
+};
+
+// ============================================================================
+// PHYSICS-BASED THERMAL MODEL - CONFIGURATION
+// ============================================================================
+var PHYSICS = {
+    // Battery configuration
+    batteryVoltage: 3.7,  // Configurable (3.7-4.2V typical)
+    rInternal: 0.05,      // Battery internal resistance (ohms)
+    
+    // Thermal constants
+    sigma: 5.67e-8,        // Stefan-Boltzmann constant
+    emissivity: 0.85,     // Coil surface emissivity
+    Lv: 850000,          // Latent vaporization (J/kg) for e-liquid
+    
+    // Evaporative cooling parameters (assuming 50/50 PG/VG mix)
+    kEvap: 0.00015,       // Evaporation coefficient (kg/s/m²/K)
+    boilingPoint: 240,    // E-liquid boiling point (°C) - adjusted for PG/VG
+    
+    // Convective cooling parameters
+    hBase: 10,            // Base heat transfer (W/m²/K)
+    airflowBase: 1.0,     // Base airflow multiplier
+    airflowPuff: 4.0,    // Airflow during puff
+    
+    // Burn thresholds
+    heatFluxThreshold: 350,   // mW/mm² = burn risk
+    tempBurnThreshold: 600,   // °F = burn risk
+    dryHitTempThreshold: 450, // °F = dry hit warning
+    
+    // Puff simulation
+    puffDuration: 3.0,     // Default puff duration (seconds)
+    cooldownTime: 2.0,    // Cooldown between puffs (seconds)
+    
+    // Wick saturation
+    wickReplenishRate: 0.3, // Liquid replenishment rate (1/s)
+    initialSaturation: 1.0 // 100% saturated
+};
+
+function cToF(c){ return c*9/5+32; }
+function fToC(f){ return (f-32)*5/9; }
+
+// Get temperature-dependent specific heat (approximation for metals)
+function getSpecificHeat(tempC, shBase) {
+    const deltaT = tempC - 20;
+    return shBase * (1 + 0.0002 * deltaT); // Slight increase with temp
+}
+
+// Get temperature-dependent resistance using TCR
+// Enhanced: Non-linear for SS and Ni; linear fallback for others
+function getTemperatureResistance(R0, alpha, tempC, materialKey) {
+    const deltaT = tempC - 20;
+    try {
+        if (materialKey.startsWith('ss') || materialKey === 'ni200') {
+            // Quadratic approximation for non-linear TCR
+            const alpha2 = alpha * 0.001; // Small quadratic term for realism
+            return R0 * (1 + alpha * deltaT + alpha2 * deltaT * deltaT);
+        } else if (materialKey === 'ni200lin') {
+            // Linear for Ni200 linear
+            return R0 * (1 + alpha * deltaT);
+        } else {
+            // Fallback to linear for others (e.g., Kanthal, Nichrome)
+            return R0 * (1 + alpha * deltaT);
+        }
+    } catch (e) {
+        // Fallback to linear if materialKey is invalid
+        return R0 * (1 + alpha * deltaT);
+    }
+}
+
+// Get dynamic power from battery voltage and coil resistance
+// Enhanced: Accounts for battery sag (internal resistance)
+// P = (V - I*R_int)² / R
+function getDynamicPower(voltage, resistance) {
+    const I = voltage / resistance; // Approximate current
+    const actualVoltage = voltage - I * PHYSICS.rInternal;
+    return Math.max(0, (actualVoltage * actualVoltage) / resistance);
+}
+
+// Get convective heat transfer coefficient - continuous model
+// Enhanced: Scales with temperature, power, evaporation (airflow fixed at 1.0 for now)
+function getHeatTransferCoefficient(tempC, tambC, power, wickSaturation = 1.0) {
+    const deltaT = Math.max(tempC - tambC, 0);
+
+    // Natural convection baseline (scales with temp difference)
+    const naturalConvection = 25 + 0.15 * deltaT;
+
+    // Airflow increases with power (fixed boost for now)
+    const powerFactor = 1 + (power / 40);
+    const airflowBoost = 1.0; // Fixed; can be made adjustable later
+
+    // Evaporation kicks in gradually above ~100C
+    const evapFactor = Math.max(0, (tempC - 100) / 150);
+
+    // Combine - wet wick adds cooling boost
+    const wetnessBoost = wickSaturation > 0.2 ? 1.5 : 1.0;
+
+    let h = naturalConvection * powerFactor * airflowBoost * wetnessBoost;
+
+    // Add evaporative cooling component
+    if (tempC > 100) {
+        h += evapFactor * 60 * wickSaturation;
+    }
+
+    return h;
+}
+
+// Get radiative heat loss (Stefan-Boltzmann)
+function getRadiativeLoss(tempC, tambC, surfaceAreaMm2) {
+    const tempK = tempC + 273.15;
+    const ambK = tambC + 273.15;
+    const surfaceAreaM2 = surfaceAreaMm2 / 1e6;
+    return PHYSICS.emissivity * PHYSICS.sigma * surfaceAreaM2 * (Math.pow(tempK, 4) - Math.pow(ambK, 4));
+}
+
+// Get evaporative cooling when above boiling point
+// Q_evap = k_evap * surface_area * (T - boiling_point) * saturation
+function getEvaporativeCooling(tempC, surfaceAreaMm2, wickSaturation) {
+    if (tempC < PHYSICS.boilingPoint || wickSaturation <= 0) return 0;
+    const deltaT = tempC - PHYSICS.boilingPoint;
+    const surfaceAreaM2 = surfaceAreaMm2 / 1e6;
+    // Energy removed per second
+    return PHYSICS.kEvap * surfaceAreaM2 * deltaT * wickSaturation * PHYSICS.Lv;
+}
+
+// Physics-based temperature simulation with puff cycles
+// dT/dt = (P - Q_loss - Q_evap) / (mass * specific_heat)
+function buildPhysicsTempCurve(params) {
+    const { wire, material, length, tambF, tmax, voltage, targetPower, spacingFactor } = params;
+    const airflowFactor = 1.0; // Default airflow factor (adjustable via UI)
+    const mat = MATS[material];
+    const tcr = TCR[material] || 0.0005;
+
+    // Physical properties
+    const crossSectionArea = Math.PI * Math.pow(wire / 2, 2);
+    const massKg = crossSectionArea * length * mat.dens * 1e-9;
+    const surfaceArea = Math.PI * wire * length;
+    
+    // Base resistance at 20°C
+    const R0 = mat.res * (length / 1000) / crossSectionArea;
+    
+    const tambC = fToC(tambF);
+    const dt = 0.01; // 10ms time step for stability
+    const steps = Math.ceil(tmax / dt);
+    
+    // Simulation state
+    let T = tambC;
+    let wickSaturation = PHYSICS.initialSaturation;
+    let isPuffing = true; // Start in puff mode for simulation
+    let puffTime = 0;
+    
+    const labels = [];
+    const temps = [];
+    const saturations = [];
+    const powers = [];
+    
+    // voltage is already available from params destructuring above
+    
+    let timeToVapeZone = null;
+    let timeToOptimalVape = null;
+    let timeToDryHit = null;
+    let timeToTempBurn = null;
+    let timeToEvapPlateau = null;
+    let inPlateauRegion = false;
+    
+    for (let i = 0; i <= steps; i++) {
+        const t = i * dt;
+        
+        // Determine puff state (periodic puff cycle)
+        const cycleTime = t % (PHYSICS.puffDuration + PHYSICS.cooldownTime);
+        isPuffing = cycleTime < PHYSICS.puffDuration;
+        
+        // Update wick saturation
+        if (isPuffing && wickSaturation > 0) {
+            // Liquid consumption during puff
+            const consumption = Math.min(wickSaturation, PHYSICS.wickReplenishRate * dt);
+            wickSaturation -= consumption * 0.1;
+        } else if (!isPuffing) {
+            // Wick recharges when not puffing
+            wickSaturation = Math.min(1.0, wickSaturation + PHYSICS.wickReplenishRate * dt * 0.5);
+        }
+        wickSaturation = Math.max(0, wickSaturation);
+        
+        // Get temperature-dependent resistance
+        const R = getTemperatureResistance(R0, tcr, T, material);
+        
+        // TCR: resistance increases with temperature -> power drops
+        // More realistic for SS/Ni/Ti wire
+        const tcrFactor = 1 + tcr * (T - 20);
+        
+        // Effective power: target power scaled by cold/hot resistance ratio.
+        // Regulated mods maintain constant power output; unregulated mods drop.
+        // We model regulated behaviour: power stays at targetPower but
+        // resistance rise is still tracked for accurate thermal simulation.
+        const hotR = R0 * tcrFactor;
+        const effectivePower = targetPower * (R0 / hotR);
+        
+        // actualPower used for convection coefficient (same as effectivePower here)
+        const actualPower = effectivePower;
+        
+        // Continuous heat transfer coefficient (enhanced)
+        const h = getHeatTransferCoefficient(T, tambC, actualPower, wickSaturation);
+        const convectiveLoss = h * (surfaceArea / 1e6) * Math.max(T - tambC, 0);
+        const radiativeLoss = getRadiativeLoss(T, tambC, surfaceArea);
+
+        // Latent heat absorption - juice boiling absorbs energy (phase change)
+        const boilingC = PHYSICS.boilingPoint;
+        let latentCooling = 0;
+        if (T > boilingC && wickSaturation > 0) {
+            // This creates the plateau effect
+            latentCooling = (T - boilingC) * surfaceArea * 0.005;
+            latentCooling *= wickSaturation; // Less juice = less latent cooling
+        }
+
+        const totalHeatLoss = convectiveLoss + radiativeLoss + latentCooling;
+
+        // Dynamic thermal capacity (temperature-dependent specific heat, with wick factor)
+        const thermalCap = Math.max(massKg * getSpecificHeat(T, mat.sh * 10), 1e-6);
+
+        // Temperature derivative: dT/dt = (P - Q_loss) / C
+        const dT = (effectivePower - totalHeatLoss) / thermalCap;
+        
+        // Update temperature
+        T = Math.max(tambC, T + dT * dt);
+        
+        const tempF = cToF(T);
+        const tempC = T;
+        
+        // Track key events
+        if (timeToVapeZone === null && tempF >= 200) timeToVapeZone = t;
+        if (timeToOptimalVape === null && tempF >= 392) timeToOptimalVape = t;
+        
+        // Dry hit detection (low saturation + high temp)
+        if (timeToDryHit === null && wickSaturation < 0.2 && tempF >= PHYSICS.dryHitTempThreshold) {
+            timeToDryHit = t;
+        }
+        
+        // Burn detection
+        if (timeToTempBurn === null && tempF >= PHYSICS.tempBurnThreshold) timeToTempBurn = t;
+        
+        // Track evaporation plateau
+        if (!inPlateauRegion && isPuffing && tempC > PHYSICS.boilingPoint - 20) {
+            inPlateauRegion = true;
+            timeToEvapPlateau = t;
+        }
+        
+        // Record data at regular intervals for plotting
+        if (i % 10 === 0) {
+            labels.push(t.toFixed(2));
+            temps.push(tempF);
+            saturations.push(wickSaturation);
+            powers.push(actualPower);
+        }
+        
+        // Stop if temp exceeds safety limit
+        if (tempF > 900) break;
+    }
+    
+    return {
+        labels: labels,
+        temps: temps,
+        saturations: saturations,
+        powers: powers,
+        timeToVapeZone: timeToVapeZone,
+        timeToOptimalVape: timeToOptimalVape,
+        timeToDryHit: timeToDryHit,
+        timeToTempBurn: timeToTempBurn,
+        timeToEvapPlateau: timeToEvapPlateau,
+        R0: R0,
+        surfaceArea: surfaceArea
+    };
+}
+
+function getHeatLossAtTemp(tempC, tambC, surfaceAreaMm2, juiceLevel, power){
+    const deltaC = Math.max(tempC - tambC, 0);
+    // Use continuous cooling model
+    const h = getHeatTransferCoefficient(tempC, tambC, power || 20, juiceLevel);
+    const convectiveLoss = h * (surfaceAreaMm2 / 1000000) * deltaC;
+    const radiativeLoss = getRadiativeLoss(tempC, tambC, surfaceAreaMm2);
+
+    // Add latent heat component
+    let latentCooling = 0;
+    if (tempC > PHYSICS.boilingPoint && juiceLevel > 0) {
+        // Reasonable latent heat absorption (few watts max)
+        latentCooling = (tempC - PHYSICS.boilingPoint) * surfaceAreaMm2 * 0.005 * juiceLevel;
+    }
+
+    return convectiveLoss + radiativeLoss + latentCooling;
+}
+
+function buildTempCurve(power, wire, length, tambF, tmax, matKey){
+    const mat = MATS[matKey];
+    const tcr = TCR[matKey] || 0.0005;
+    const area = Math.PI * Math.pow(wire / 2, 2);
+    const massKg = area * length * mat.dens * 1e-9;
+    const thermalCap = Math.max(massKg * mat.sh, 1e-6);
+    const surfaceArea = Math.PI * wire * length;
+    const tambC = fToC(tambF);
+
+    // Higher resolution for smoother curves
+    const dt = 0.01;
+    const steps = Math.ceil(tmax / dt);
+
+    const labels = [], temps = [];
+    let timeToVapeZone = null, timeToOptimalVape = null, timeToTempBurn = null, T = tambC, juice = 1.0;
+    let resistance = mat.res * (length / 1000) / area;
+    const baseResistance = resistance;
+    const boilC = PHYSICS.boilingPoint;
+    const clampStrength = 0.85;
+    
+    for(let i = 0; i <= steps; i++){
+        const t = i * dt;
+        if(t > tmax) break;
+        const tempF = cToF(T);
+        if(timeToVapeZone === null && tempF >= 200) timeToVapeZone = t;
+        if(timeToOptimalVape === null && tempF >= 450) timeToOptimalVape = t;
+        if(timeToTempBurn === null && tempF >= 600) timeToTempBurn = t;
+        labels.push(t.toFixed(2));
+        temps.push(tempF);
+        
+        // TCR - resistance increases with temp, power drops
+        const tcrFactor = 1 + tcr * (T - 20);
+        resistance = baseResistance * tcrFactor;
+        const actualPower = (power * baseResistance) / resistance;
+        
+        // Continuous heat transfer coefficient
+        const deltaT = Math.max(T - tambC, 0);
+        const h = 25 + 0.15 * deltaT + (power / 60) * 40;
+        const convLoss = h * (surfaceArea / 1000000) * deltaT;
+        
+        // Latent heat - juice boiling absorbs energy (creates plateau)
+        let latentCooling = 0;
+        if (T > 220 && juice > 0) {
+            latentCooling = (T - 220) * surfaceArea * 0.005 * juice;
+        }
+        
+        // Juice consumption
+        juice = Math.max(0, juice - actualPower * dt / (PHYSICS.Lv * 100));
+        
+        const Tk = T + 273.15;
+        const TambK = tambC + 273.15;
+        const radLoss = PHYSICS.emissivity * PHYSICS.sigma * (surfaceArea / 1000000) * (Math.pow(Tk, 4) - Math.pow(TambK, 4));
+        
+        const totalHeatLoss = convLoss + radLoss + latentCooling;
+        
+        const dT = (actualPower - totalHeatLoss) / thermalCap;
+        T = Math.max(tambC, T + dT * dt);
+        if(T > boilC) {
+            const excess = T - boilC;
+            T -= excess * clampStrength;
+        }
+    }
+    return { labels, temps, timeToVapeZone, timeToOptimalVape, timeToTempBurn };
+}
+function formatVapeTime(timeToVapeZone, timeToOptimalVape, tambF){
+    if(timeToVapeZone !== null && timeToVapeZone <= 0.1) return '< 0.1s';
+    if(timeToVapeZone !== null) return timeToVapeZone.toFixed(2) + 's';
+    const targetTempF = 200, deltaT_C = (targetTempF - tambF) * 5 / 9;
+    return deltaT_C > 0 ? '—' : '< 0.1s';
+}
+function getFluxStatus(heatFlux, tempC){
+    // Steam Engine scale: simple thresholds
+    if(heatFlux < 150) return { color:'#3B6D11', hint:'Low' };
+    if(heatFlux < 250) return { color:'#185FA5', hint:'Good' };
+    if(heatFlux < 350) return { color:'#BA7517', hint:'Warm' };
+    return { color:'#A32D2D', hint:'Hot' };
+}
+
+function getWetnessFactor(saturation) {
+    // Effective wet surface factor based on wick saturation
+    return 0.3 + 0.5 * saturation;
+}
+
+function getSaltNicStrength(resistance, wattage){
+    if (wattage <= 10) return '40–50 mg (salt)';
+    if (wattage <= 15) return '30–50 mg (salt)';
+    if (wattage <= 20) return '20–30 mg (salt)';
+    if (wattage <= 25) return '12–20 mg (salt)';
+    if (wattage <= 35) return '6–12 mg';
+    if (wattage <= 50) return '3–6 mg (freebase)';
+    if (wattage <= 70) return '2–3 mg (freebase)';
+    return '1.5–3 mg (freebase)';
+}
+
+function calculateCoil(params){
+    const { wireAwg, material, innerDiameter, wraps, legLength, power, tambF, tmax, spacingFactor = 1.0, voltage = 3.7 } = params;
+    const wire = awgToMm(wireAwg);
+    const mat = MATS[material];
+    const { totalLength: length, crossSectionArea: area, surfaceArea: surface, coilWidth } = getCoilMetrics(wire, innerDiameter, wraps, legLength, spacingFactor);
+    
+    // Base resistance at 20°C
+    const baseResistance = mat.res * (length / 1000) / area;
+    const tcr = TCR[material] || 0.0005;
+    
+    // Calculate resistance at operating temp (approximate)
+    const R = getTemperatureResistance(baseResistance, tcr, 200, material);
+    
+    // Dynamic power based on voltage
+    const dynamicPower = getDynamicPower(voltage, R);
+    
+    // Heat flux (use wetness factor)
+    // Steam Engine-style perceived heat intensity (not literal physics)
+    const effectiveSurface = surface * 0.28;
+    const geometryFactor = Math.pow(wraps, 0.65);
+    const wireFactor = Math.sqrt(wire * 1000);
+    const experienceBoost = 1.0 + (0.15 * wraps) + (0.25 / wire) + (power / 30);
+    const STEAM_ENGINE_SCALE = 1.5;
+    const heatFlux = (power / effectiveSurface) * geometryFactor * wireFactor * experienceBoost * STEAM_ENGINE_SCALE;
+    const dynamicHeatFlux = (dynamicPower / (surface * getWetnessFactor(1.0))) * 1000;
+    
+    const tambC = fToC(tambF);
+    
+    // Safe power ranges based on physics
+    const minSafePower = Math.max(5, Math.round(getHeatLossAtTemp(200, tambC, surface, 1, 0)));
+    const maxSafePower = Math.max(minSafePower + 5, Math.round(getHeatLossAtTemp(260, tambC, surface, 1, 0)));
+    const instantBurnWatts = Math.max(1, Math.round(getHeatLossAtTemp(315, tambC, surface, 1, 0)));
+    
+    // Run physics-based temperature simulation
+    const chartData = buildPhysicsTempCurve({
+        wire,
+        material,
+        length,
+        tambF,
+        tmax,
+        voltage,
+        targetPower: power,
+        spacingFactor,
+        airflowFactor: 1.0
+    });
+    
+    // Fallback to simple model if physics fails
+    const tempChartData = chartData && chartData.temps && chartData.temps.length > 0 ? chartData : buildTempCurve(power, wire, length, tambF, tmax, material);
+    const peakTemp = Math.max(...tempChartData.temps);
+    const survivalTime = chartData.timeToTempBurn || Math.min(tmax, 30);
+    const tempBurnTime = chartData.timeToTempBurn !== null ? Math.min(chartData.timeToTempBurn, tmax) : tmax;
+    
+    // Calculate final resistance (at peak temp)
+    const finalR = getTemperatureResistance(baseResistance, tcr, (peakTemp - 32) * 5/9);
+    
+    return {
+        resistance: baseResistance.toFixed(3),
+        dynamicResistance: R.toFixed(3),
+        heatFlux: Math.round(heatFlux),
+        dynamicHeatFlux: Math.round(dynamicHeatFlux),
+        wireLength: length.toFixed(1),
+        peakTemp: Math.round(peakTemp),
+        timeToVapeZone: chartData.timeToVapeZone,
+        timeToOptimalVape: chartData.timeToOptimalVape,
+        timeToDryHit: chartData.timeToDryHit,
+        timeToTempBurn: chartData.timeToTempBurn,
+        timeToEvapPlateau: chartData.timeToEvapPlateau,
+        survivalTime,
+        vapeTimeDisplay: formatVapeTime(chartData.timeToVapeZone, chartData.timeToOptimalVape, tambF),
+        wattageRange: minSafePower + '–' + maxSafePower + 'W',
+        saltNicStrength: getSaltNicStrength(baseResistance, power),
+        chartData,
+        tambF,
+        tmax,
+        instantBurnWatts,
+        currentPower: power,
+        dynamicPower: Math.round(dynamicPower),
+        finalResistance: finalR.toFixed(3),
+        fluxBarWidth: Math.min(heatFlux < 120 ? heatFlux / 120 * 100 : heatFlux < 200 ? (heatFlux - 120) / 80 * 100 + 33 : heatFlux < 300 ? (heatFlux - 200) / 100 * 100 + 66 : 100, 100),
+        fluxStatus: getFluxStatus(heatFlux, 200),
+        tempBurnTime,
+        coilWidth,
+        surfaceArea: surface,
+        baseResistance,
+        tcr
+    };
+}
+sharedCalc.calculateCoil = calculateCoil;
+sharedCalc.awgToMm = awgToMm;
+
+    // take over the page
+    document.documentElement.style.cssText = 'overflow:hidden;height:100%;';
+    document.body.style.cssText = 'overflow:hidden;height:100%;margin:0;padding:0;';
+    document.body.innerHTML = '';
+
+    // Initialize chart globals expected by tests
+    window.ccLabels = [];
+    window.ccTempBurnTime = null;
+    window.ccFluxBurnTime = null;
+    window.ccInstantBurnWatts = null;
+    window.ccTimeToVapeZone = null;
+    window.ccCurrentPower = 14;
+
+    const style = document.createElement('style');
+style.textContent = `
+#cc-wrap * { box-sizing: border-box; margin: 0; padding: 0; }
+
+#cc-wrap {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 999999;
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #1a1a1a;
+    color: #e8e8e8;
+    overflow: hidden;
+}
+
+#cc-sidebar {
+    background: #141414;
+    border-right: 1px solid #2e2e2e;
+    padding: 14px;
+    overflow-y: auto;
+    height: 100vh;
+}
+#cc-sidebar h2 { font-size: 14px; font-weight: 600; color: #fff; margin-bottom: 2px; }
+#cc-sidebar .sub { font-size: 11px; color: #555; margin-bottom: 14px; }
+
+#cc-main {
+    display: flex;
+    flex-direction: column;
+    padding: 14px;
+    gap: 10px;
+    min-width: 0;
+    height: 100vh;
+    overflow: hidden;
+}
+
+.cc-slabel {
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #444;
+    margin: 12px 0 7px;
+}
+
+.cc-field { margin-bottom: 7px; }
+.cc-field:last-child { margin-bottom: 0; }
+.cc-field label { display: block; font-size: 11px; color: #777; margin-bottom: 3px; }
+
+.cc-field select {
+    width: 100%;
+    background: #1e1e1e;
+    border: 1px solid #333;
+    border-radius: 7px;
+    color: #ddd;
+    font-size: 11px;
+    padding: 5px 8px;
+    outline: none;
+    cursor: pointer;
+}
+.cc-field select:hover { border-color: #444; }
+
+.cc-spinner {
+    display: flex;
+    align-items: center;
+    background: #1e1e1e;
+    border: 1px solid #333;
+    border-radius: 7px;
+    overflow: hidden;
+}
+.cc-spinner.disabled { opacity: 0.4; pointer-events: none; }
+.cc-spinner:focus-within { border-color: #555; }
+
+.cc-spbtn {
+    background: none;
+    border: none;
+    color: #555;
+    cursor: pointer;
+    width: 26px;
+    height: 28px;
+    font-size: 15px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: color 0.1s, background 0.1s;
+}
+.cc-spbtn:hover { color: #e8e8e8; background: #2a2a2a; }
+.cc-spbtn.m { border-right: 1px solid #2e2e2e; }
+.cc-spbtn.p { border-left: 1px solid #2e2e2e; }
+
+.cc-spinner input {
+    flex: 1;
+    background: none;
+    border: none;
+    color: #ddd;
+    font-size: 12px;
+    text-align: center;
+    outline: none;
+    min-width: 0;
+    padding: 5px 0;
+    -moz-appearance: textfield;
+}
+.cc-spinner input::-webkit-outer-spin-button,
+.cc-spinner input::-webkit-inner-spin-button { -webkit-appearance: none; }
+
+.cc-divider { border: none; border-top: 1px solid #222; margin: 10px 0; }
+
+.cc-results {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+.cc-rcard { 
+    background: #222; 
+    border-radius: 9px; 
+    padding: 10px 12px; 
+    min-width: 80px;
+    text-align: center;
+}
+.cc-rcard-label { font-size: 9px; color: #555; margin-bottom: 3px; text-transform: uppercase; letter-spacing: 0.06em; }
+.cc-rcard-val { font-size: 20px; font-weight: 600; color: #fff; line-height: 1; }
+.cc-rcard-unit { font-size: 10px; color: #444; margin-top: 2px; }
+
+.cc-flux-bar-bg { height: 3px; background: #333; border-radius: 2px; margin-top: 6px; overflow: hidden; }
+.cc-flux-bar-fill { height: 100%; border-radius: 2px; transition: width 0.3s, background 0.3s; }
+.cc-flux-hint { font-size: 10px; color: #555; margin-top: 3px; }
+
+.cc-panels {
+    display: grid;
+    grid-template-columns: 1fr 1.5fr;
+    gap: 10px;
+    flex: 1;
+    min-height: 0;
+}
+
+.cc-panels-left {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 0;
+}
+
+.cc-panel.coil {
+    flex: 0.6;
+    min-height: 0;
+}
+
+.cc-panel.salt-nic {
+    flex: 0.4;
+    padding: 12px;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    background: #222;
+}
+
+.cc-salt-nic-label {
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #555;
+    margin-bottom: 6px;
+}
+
+.cc-salt-nic-val {
+    font-size: 28px;
+    font-weight: 600;
+    color: #fff;
+    line-height: 1;
+}
+
+.cc-panel {
+    background: #111;
+    border-radius: 10px;
+    border: 1px solid #222;
+    padding: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.cc-panel.chart {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+}
+
+.cc-panel-title {
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: #444;
+    margin-bottom: 8px;
+    flex-shrink: 0;
+}
+
+.cc-chart-wrap {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+}
+
+.cc-legend {
+    display: flex;
+    gap: 12px;
+    font-size: 10px;
+    color: #555;
+    margin-top: 7px;
+    flex-wrap: wrap;
+    flex-shrink: 0;
+}
+
+.cc-leg-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    display: inline-block;
+    margin-right: 3px;
+    vertical-align: middle;
+}
+
+#cc-toggle {
+    position: fixed;
+    bottom: 12px;
+    right: 12px;
+    background: #222;
+    border: 1px solid #333;
+    border-radius: 7px;
+    color: #888;
+    font-size: 11px;
+    cursor: pointer;
+    padding: 5px 10px;
+    font-family: inherit;
+    transition: background 0.1s;
+    z-index: 9999999;
+}
+#cc-toggle:hover { background: #2e2e2e; color: #ddd; }
+`;
+document.head.appendChild(style);
+
+let currentMat = 'n80';
+
+const app = document.createElement('div');
+app.id = 'cc-wrap';
+app.innerHTML = `
+<div id="cc-sidebar">
+    <h2>Coil builder</h2>
+    <div class="sub">Resistance &amp; heat flux</div>
+
+    <div class="cc-slabel">Wire</div>
+    <div class="cc-field">
+        <label>Material</label>
+        <select id="cc-mat">
+            <option value="n80">Nichrome N80 (A)</option>
+            <option value="n20">Nichrome N20</option>
+            <option value="n40">Nichrome N40</option>
+            <option value="n60">Nichrome N60 (C)</option>
+            <option value="n70">Nichrome N70 (B)</option>
+            <option value="n90">Nichrome N90</option>
+            <option value="ka1">Kanthal A1 / APM</option>
+            <option value="ka">Kanthal A / AE / AF</option>
+            <option value="kd">Kanthal D</option>
+            <option value="ss304">SS 304</option>
+            <option value="ss316">SS 316</option>
+            <option value="ss316l">SS 316L / Elite</option>
+            <option value="ss317l">SS 317L / Haywire</option>
+            <option value="ss321">SS 321</option>
+            <option value="ss430">SS 430</option>
+            <option value="ss904l">SS 904L</option>
+            <option value="au">Gold</option>
+            <option value="ag">Silver</option>
+            <option value="cu">Copper</option>
+            <option value="ti1">Titanium 1</option>
+            <option value="ti2">Titanium 2 (R50400)</option>
+            <option value="tie">Titanium ready (e-SG)</option>
+            <option value="w">Tungsten</option>
+            <option value="nio">Niobium alloy</option>
+            <option value="ni200lin">Nickel Ni200 (linear TCR)</option>
+            <option value="ni200">Nickel Ni200 (TFR curve)</option>
+            <option value="nife30">NiFe30 (Resistherm - TFR)</option>
+            <option value="dicodes">NiFe30 (Resistherm - TCR)</option>
+            <option value="reactor">NiFe (Reactor Wire)</option>
+            <option value="nife30stealth">NiFe30 (StealthVape)</option>
+            <option value="invar36">Invar 36 / Nilo 36</option>
+            <option value="nidh">Nickel DH</option>
+            <option value="nft70">Nifethal 70 (Alloy120)</option>
+            <option value="nft52">Nifethal 52 (Alloy52)</option>
+            <option value="zr">Zirconium (pure)</option>
+        </select>
+    </div>
+    <div class="cc-field">
+        <label>Diameter (AWG)</label>
+        <div class="cc-spinner">
+            <button class="cc-spbtn m" data-id="cc-wire" data-step="1">&#8722;</button>
+            <input type="number" id="cc-wire" value="28" step="1">
+            <button class="cc-spbtn p" data-id="cc-wire" data-step="1">+</button>
+        </div>
+    </div>
+    <div class="cc-field">
+        <label>Resistivity (&#937;&#183;mm&#178;/m)</label>
+        <div class="cc-spinner disabled">
+            <input type="number" id="cc-res" value="1.10" readonly>
+        </div>
+    </div>
+
+    <hr class="cc-divider">
+    <div class="cc-slabel">Geometry</div>
+    <div class="cc-field">
+        <label>Inner diameter (mm)</label>
+        <div class="cc-spinner">
+            <button class="cc-spbtn m" data-id="cc-idia" data-step="0.5">&#8722;</button>
+            <input type="number" id="cc-idia" value="2.0" step="0.5">
+            <button class="cc-spbtn p" data-id="cc-idia" data-step="0.5">+</button>
+        </div>
+    </div>
+    <div class="cc-field">
+        <label>Wraps</label>
+        <div class="cc-spinner">
+            <button class="cc-spbtn m" data-id="cc-wraps" data-step="1">&#8722;</button>
+            <input type="number" id="cc-wraps" value="6" step="1">
+            <button class="cc-spbtn p" data-id="cc-wraps" data-step="1">+</button>
+        </div>
+    </div>
+    <div class="cc-field">
+        <label>Leg length (mm)</label>
+        <div class="cc-spinner">
+            <button class="cc-spbtn m" data-id="cc-legs" data-step="0.5">&#8722;</button>
+            <input type="number" id="cc-legs" value="6.5" step="0.5">
+            <button class="cc-spbtn p" data-id="cc-legs" data-step="0.5">+</button>
+        </div>
+    </div>
+    <div class="cc-field">
+        <label>Coil spacing (× wire)</label>
+        <div class="cc-spinner">
+            <button class="cc-spbtn m" data-id="cc-spacing" data-step="0.1">&#8722;</button>
+            <input type="number" id="cc-spacing" value="1.0" step="0.1" min="1.0" max="5.0">
+            <button class="cc-spbtn p" data-id="cc-spacing" data-step="0.1">+</button>
+        </div>
+    </div>
+
+    <hr class="cc-divider">
+    <div class="cc-slabel">Power</div>
+    <div class="cc-field">
+        <label style="display:none">Battery voltage (V)</label>
+        <div class="cc-spinner">
+            <button class="cc-spbtn m" data-id="cc-voltage" data-step="0.1">&#8722;</button>
+            <input type="number" id="cc-voltage" value="3.7" step="0.1" min="2.5" max="4.35">
+            <button class="cc-spbtn p" data-id="cc-voltage" data-step="0.1">+</button>
+        </div>
+    </div>
+    <div class="cc-field">
+        <label>Target power (W)</label>
+        <div class="cc-spinner">
+            <button class="cc-spbtn m" data-id="cc-power" data-step="1">&#8722;</button>
+            <input type="number" id="cc-power" value="14" step="1" min="1">
+            <button class="cc-spbtn p" data-id="cc-power" data-step="1">+</button>
+        </div>
+    </div>
+
+    <hr class="cc-divider">
+    <div class="cc-slabel">Puff Simulation</div>
+    <div class="cc-field">
+        <label>Puff duration (s)</label>
+        <div class="cc-spinner">
+            <button class="cc-spbtn m" data-id="cc-puff-dur" data-step="0.5">&#8722;</button>
+            <input type="number" id="cc-puff-dur" value="3" step="0.5" min="1" max="30">
+            <button class="cc-spbtn p" data-id="cc-puff-dur" data-step="0.5">+</button>
+        </div>
+    </div>
+    <div class="cc-field">
+        <label>Airflow intensity</label>
+        <div class="cc-spinner">
+            <button class="cc-spbtn m" data-id="cc-airflow" data-step="0.5">&#8722;</button>
+            <input type="number" id="cc-airflow" value="1.0" step="0.5" min="0.5" max="5">
+            <button class="cc-spbtn p" data-id="cc-airflow" data-step="0.5">+</button>
+        </div>
+    </div>
+
+    <hr class="cc-divider">
+    <div class="cc-slabel">Thermal model</div>
+    <div class="cc-field">
+        <label>Ambient temp (&#176;F)</label>
+        <div class="cc-spinner">
+            <button class="cc-spbtn m" data-id="cc-tamb" data-step="1">&#8722;</button>
+            <input type="number" id="cc-tamb" value="77" step="1">
+            <button class="cc-spbtn p" data-id="cc-tamb" data-step="1">+</button>
+        </div>
+    </div>
+    </div>
+
+<div id="cc-main">
+    <div class="cc-results">
+        <div class="cc-rcard">
+            <div class="cc-rcard-label">Salt nic strength</div>
+            <div class="cc-rcard-val" id="cc-out-salt-nic">&#8212;</div>
+            <div class="cc-rcard-unit">mg</div>
+        </div>
+        <div class="cc-rcard">
+            <div class="cc-rcard-label">Heat flux</div>
+            <div class="cc-rcard-val" id="cc-out-flux">&#8212;</div>
+            <div class="cc-rcard-unit">Heat</div>
+            <div class="cc-flux-bar-bg"><div class="cc-flux-bar-fill" id="cc-flux-bar"></div></div>
+            <div class="cc-flux-hint" id="cc-flux-hint"></div>
+        </div>
+        <div class="cc-rcard">
+            <div class="cc-rcard-label">Wire length</div>
+            <div class="cc-rcard-val" id="cc-out-len">&#8212;</div>
+            <div class="cc-rcard-unit">mm</div>
+        </div>
+        <div class="cc-rcard">
+            <div class="cc-rcard-label">Peak temp</div>
+            <div class="cc-rcard-val" id="cc-out-peak">&#8212;</div>
+            <div class="cc-rcard-unit">&#176;F</div>
+        </div>
+        <div class="cc-rcard">
+            <div class="cc-rcard-label">R (cold / hot)</div>
+            <div class="cc-rcard-val" id="cc-out-res-dyn">&#8212;</div>
+            <div class="cc-rcard-unit">&#937;</div>
+        </div>
+        <div class="cc-rcard">
+            <div class="cc-rcard-label">Dynamic P</div>
+            <div class="cc-rcard-val" id="cc-out-dyn-power">&#8212;</div>
+            <div class="cc-rcard-unit">W @ <span id="cc-out-voltage"></span>V</div>
+        </div>
+        <div class="cc-rcard">
+            <div class="cc-rcard-label">Safe range</div>
+            <div class="cc-rcard-val" id="cc-out-rec-power">&#8212;</div>
+            <div class="cc-rcard-unit">W</div>
+        </div>
+        <div class="cc-rcard">
+            <div class="cc-rcard-label">Vape time</div>
+            <div class="cc-rcard-val" id="cc-out-vape-time">&#8212;</div>
+            <div class="cc-rcard-unit">s</div>
+        </div>
+        </div>
+
+    <div class="cc-panels">
+        <div class="cc-panels-left">
+            <div class="cc-panel salt-nic">
+                <div class="cc-salt-nic-label">Resistance</div>
+                <div class="cc-salt-nic-val" id="cc-out-res">&#8212;</div>
+            </div>
+            <div class="cc-panel coil">
+                <svg id="cc-coil-svg" width="100%" height="100%" viewBox="0 0 320 190" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet"></svg>
+            </div>
+        </div>
+        <div class="cc-panel chart">
+            <div class="cc-panel-title">Wire temperature with puff simulation</div>
+            <div class="cc-chart-wrap">
+                <canvas id="cc-tempChart"></canvas>
+            </div>
+            <div class="cc-legend">
+                <span><span class="cc-leg-dot" style="background:#E24B4A"></span>Wire temp (&#176;F)</span>
+                <span><span class="cc-leg-dot" style="background:#378ADD;opacity:0.5"></span>Vape zone (392–490°F)</span>
+                <span><span class="cc-leg-dot" style="background:#D2790F"></span>Evap plateau (~446°F)</span>
+                <span><span class="cc-leg-dot" style="background:#FF6B6B;opacity:0.7"></span>Dry hit zone (>450°F)</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+`;
+document.body.appendChild(app);
+
+let chart = null;
+
+function g(id){ return document.getElementById(id); }
+function gv(id){ return parseFloat(g(id).value) || 0; }
+
+function getCoilMetrics(wire, innerDiameter, wraps, legLength, spacingFactor = 1.0){
+    // Improved helix length: arc length = N * sqrt((2πr)² + p²)
+    const meanRadius = (innerDiameter + wire) / 2;
+    const turnPitch = wire * spacingFactor;
+    const circumf = 2 * Math.PI * meanRadius;
+    const turnLength = Math.sqrt(circumf * circumf + turnPitch * turnPitch);
+    const totalLength = turnLength * wraps + Math.max(legLength, 0);
+    const crossSectionArea = Math.PI * Math.pow(wire / 2, 2);
+    const surfaceArea = Math.PI * wire * totalLength;
+    const coilWidth = wraps * turnPitch;
+    return { totalLength, crossSectionArea, surfaceArea, coilWidth, turnPitch };
+}
+
+
+
+function calculate(){
+    var resEl = document.getElementById('cc-out-res');
+    var matEl = document.getElementById('cc-mat');
+    if (!resEl || !matEl) {
+        setTimeout(calculate, 200);
+        return;
+    }
+    var fluxEl = document.getElementById('cc-out-flux');
+    var lenEl = document.getElementById('cc-out-len');
+    var peakEl = document.getElementById('cc-out-peak');
+    var saltEl = document.getElementById('cc-out-salt-nic');
+    var powEl = document.getElementById('cc-out-dyn-power');
+    var voltEl = document.getElementById('cc-out-voltage');
+    var recEl = document.getElementById('cc-out-rec-power');
+    var vapeEl = document.getElementById('cc-out-vape-time');
+    
+    if (!resEl) {
+        setTimeout(calculate, 200);
+        return;
+    }
+    
+    // Get input values
+    var wireEl = document.getElementById('cc-wire');
+    var matEl = document.getElementById('cc-mat');
+    var idiaEl = document.getElementById('cc-idia');
+    var wrapsEl = document.getElementById('cc-wraps');
+    var legsEl = document.getElementById('cc-legs');
+    var powerEl = document.getElementById('cc-power');
+    var voltageEl = document.getElementById('cc-voltage');
+    var puffDurEl = document.getElementById('cc-puff-dur');
+    var spacingEl = document.getElementById('cc-spacing');
+    var tambEl = document.getElementById('cc-tamb');
+    if (!wireEl || !matEl || !idiaEl || !wrapsEl || !legsEl || !powerEl || !voltageEl || !puffDurEl || !spacingEl || !tambEl) {
+        setTimeout(calculate, 200);
+        return;
+    }
+    var wireAwg = parseFloat(wireEl.value) || 28;
+    var material = matEl.value;
+    var innerDiameter = parseFloat(idiaEl.value) || 2.0;
+    var wraps = parseFloat(wrapsEl.value) || 6;
+    var legLength = parseFloat(legsEl.value) || 6.5;
+    var power = Math.max(1, parseFloat(powerEl.value) || 14);
+    var voltage = parseFloat(voltageEl.value) || 3.7;
+    var puffDur = Math.max(parseFloat(puffDurEl.value) || 3, 1);
+    var spacingFactor = parseFloat(spacingEl.value) || 1.0;
+    var tambF = parseFloat(tambEl.value) || 77;
+    
+    // Run full calculation using sharedCalc
+    var result = sharedCalc.calculateCoil({
+        wireAwg: wireAwg,
+        material: material,
+        innerDiameter: innerDiameter,
+        wraps: wraps,
+        legLength: legLength,
+        power: power,
+        tambF: tambF,
+        tmax: puffDur,
+        spacingFactor: spacingFactor,
+        voltage: voltage
+    });
+    
+    // Update UI
+    resEl.textContent = result.resistance;
+    document.getElementById('cc-out-res-dyn').textContent = result.resistance + ' / ' + result.dynamicResistance;
+    fluxEl.textContent = result.heatFlux;
+    
+    // Update flux bar
+    var fluxBar = document.getElementById('cc-flux-bar');
+    var fluxPct = result.fluxBarWidth;
+    fluxBar.style.width = fluxPct + '%';
+    fluxBar.style.backgroundColor = result.fluxStatus.color;
+    document.getElementById('cc-flux-hint').textContent = result.fluxStatus.hint;
+    
+    lenEl.textContent = result.wireLength;
+    peakEl.textContent = result.peakTemp;
+    saltEl.textContent = result.saltNicStrength;
+    powEl.textContent = result.currentPower;
+    voltEl.textContent = voltage.toFixed(1);
+    recEl.textContent = result.wattageRange;
+    vapeEl.textContent = result.vapeTimeDisplay;
+    
+    // Draw coil
+    var spacingForDraw = parseFloat(document.getElementById('cc-spacing').value) || 1.0;
+    drawCoil(awgToMm(wireAwg), innerDiameter, wraps, legLength, spacingForDraw);
+    
+     // Draw chart
+     if (typeof Chart !== 'undefined' && result.chartData && result.chartData.labels && result.chartData.temps) {
+         drawChart(result.chartData.labels, result.chartData.temps, puffDur);
+     }
+
+     // Set chart globals expected by tests
+     window.ccLabels = result.chartData ? result.chartData.labels : [];
+     window.ccTempBurnTime = result.timeToTempBurn;
+     window.ccFluxBurnTime = result.timeToTempBurn;
+     window.ccInstantBurnWatts = result.instantBurnWatts;
+     window.ccTimeToVapeZone = result.timeToVapeZone;
+     window.ccCurrentPower = result.currentPower;
+}
+
+// Placeholder for full calculation - to be added later
+
+function drawCoil(wireDia, innerDia, wraps, legs, spacingFactor){
+    var svg = document.getElementById('cc-coil-svg');
+    if(!svg) return;
+    var W = 320, H = 190;
+    var meanDia = innerDia + wireDia;
+    var pitch = wireDia * spacingFactor;
+    var totalLength = wraps * pitch;
+    var viewW = totalLength + wireDia * 3;
+    var viewH = meanDia + legs * 2 + wireDia * 2;
+    var scale = Math.min((W - 20) / viewW, (H - 30) / viewH);
+    var wireR = (wireDia / 2) * scale;
+    var pitchS = pitch * scale;
+    var totalS = wraps * pitchS;
+    var startX = (W - totalS) / 2;
+    var centerY = H / 2;
+    var amplitude = (innerDia / 2) * scale;
+    var path = "M " + startX + " " + centerY;
+    var steps = Math.max(Math.round(wraps * 40), 20);
+    for(var i = 0; i <= steps; i++){
+        var t = i / steps;
+        var theta = t * wraps * Math.PI * 2;
+        var x = startX + t * totalS;
+        var y = centerY + Math.sin(theta) * amplitude;
+        path += " L " + x.toFixed(2) + " " + y.toFixed(2);
+    }
+    var svgContent = '<path d="' + path + '" fill="none" stroke="#E24B4A" stroke-width="' + (wireR * 2) + '" stroke-linecap="round"/>';
+    var legLen = legs * scale;
+    var leftX = startX, rightX = startX + totalS;
+    svgContent += '<line x1="' + leftX + '" y1="' + centerY + '" x2="' + leftX + '" y2="' + (centerY - legLen) + '" stroke="#E24B4A" stroke-width="' + (wireR * 2) + '" stroke-linecap="round"/><line x1="' + rightX + '" y1="' + centerY + '" x2="' + rightX + '" y2="' + (centerY + legLen) + '" stroke="#E24B4A" stroke-width="' + (wireR * 2) + '" stroke-linecap="round"/>';
+    svg.innerHTML = svgContent + '<text x="160" y="175" text-anchor="middle" fill="#555" font-size="10">' + wraps + ' wraps</text>';
+}
+
+function drawChart(labels, temps, maxTime) {
+    var canvas = document.getElementById('cc-tempChart');
+    if(!canvas) return;
+    console.log('maxTime to chart:', maxTime);
+    var displayTime = maxTime;  // debug
+    
+    // Ensure labels extend to maxTime for axis display
+    var numTimePoints = labels.length;
+    if (numTimePoints > 0) {
+        var finalLabel = parseFloat(labels[numTimePoints - 1]) || 0;
+        // If chart data ends before maxTime (puff-duration setting), extend!
+        if (finalLabel < maxTime) {
+            var lastTemp = temps[numTimePoints - 1];
+            var ext;
+            for (ext = finalLabel + 0.1; ext < maxTime; ext += 0.1) {
+                labels.push(ext.toFixed(2));
+                temps.push(lastTemp);
+            }
+            // Add the exact end time label
+            if (ext >= maxTime && ext - 0.1 < maxTime) {
+                labels.push(maxTime.toFixed(2));
+                temps.push(lastTemp);
+            }
+        }
+    }
+    
+    // Create new chart each time to ensure proper update
+    if (window.vapeChart) {
+        try { window.vapeChart.destroy(); } catch(e) {}
+    }
+    
+    window.vapeChart = new Chart(canvas, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: 'Wire temp',
+                data: temps,
+                borderColor: '#E24B4A',
+                backgroundColor: 'rgba(226,75,74,0.1)',
+                borderWidth: 2,
+                pointRadius: 0,
+                hoverRadius: 6,
+                tension: 0.2,
+                fill: true
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: { duration: 150 },
+            plugins: { 
+                legend: { display: false },
+                tooltip: { 
+                    enabled: true,
+                    intersect: false,
+                    mode: 'index'
+                }
+            },
+            scales: {
+                x: { 
+                    type: 'linear',
+                    min: 0,
+                    max: parseFloat(maxTime),
+                    ticks: { 
+                        font: { size: 9 }, 
+                        color: '#555',
+                        callback: function(value) { return value + 's'; }
+                    }, 
+                    grid: { color: 'rgba(255,255,255,0.04)' } 
+                },
+                y: { min: 50, max: 600, ticks: { font: { size: 9 }, color: '#555' }, grid: { color: 'rgba(255,255,255,0.04)' } }
+            }
+        },
+        plugins: [{
+            id: 'vapeZone',
+            beforeDraw: function(chart) {
+                var ctx = chart.ctx;
+                var chartArea = chart.chartArea;
+                if(!chartArea) return;
+                var y1 = chart.scales.y.getPixelForValue(490);
+                var y2 = chart.scales.y.getPixelForValue(392);
+                var top = Math.min(y1, y2);
+                var h = Math.abs(y1 - y2);
+                ctx.fillStyle = 'rgba(55,138,221,0.08)';
+                ctx.fillRect(chartArea.left, top, chartArea.width, h);
+                ctx.strokeStyle = 'rgba(210,121,15,0.8)';
+                ctx.setLineDash([4, 3]);
+                var midY = chart.scales.y.getPixelForValue(450);
+                ctx.beginPath();
+                ctx.moveTo(chartArea.left, midY);
+                ctx.lineTo(chartArea.right, midY);
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+        }]
+    });
+}
+
+// spinner buttons
+app.querySelectorAll('.cc-spbtn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        const inp  = g(btn.dataset.id);
+        const step = parseFloat(btn.dataset.step);
+        const dir  = btn.classList.contains('p') ? 1 : -1;
+        const val  = parseFloat(inp.value) || 0;
+        const dec  = (step.toString().split('.')[1] || '').length;
+        const newVal = Math.max(1, val + dir * step);
+        inp.value  = newVal.toFixed(dec);
+        calculate();
+    });
+});
+
+// manual input
+app.querySelectorAll('input[type=number]').forEach(inp => {
+    inp.addEventListener('input', calculate);
+});
+
+// material dropdown
+g('cc-mat').addEventListener('change', function(){
+    const m = MATS[this.value];
+    if(m){ 
+        g('cc-res').value = m.res; 
+        currentMat = this.value;
+    }
+    calculate();
+});
+
+    // Load Chart.js only if it is not already available.
+    if (typeof Chart === 'undefined') {
+        const script = document.createElement('script');
+        script.src = 'chart.min.js';
+        script.onload = function() { setTimeout(calculate, 100); };
+        script.onerror = function() { setTimeout(calculate, 100); };
+        document.head.appendChild(script);
+    }
+    // Run initial calculation immediately
+    calculate();
+
+})();
+    </script>
+</body>
+</html>

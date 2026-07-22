@@ -1,0 +1,1 @@
+const { app, BrowserWindow } = require('electron');`nconsole.log('Electron API loaded:', { app: typeof app, BrowserWindow: typeof BrowserWindow });`napp.whenReady().then(() => {`n    console.log('App ready');`n    const win = new BrowserWindow({ width: 400, height: 300 });`n    win.loadURL('about:blank');`n});
