@@ -1,8 +1,8 @@
-# my-electron-app
+# Coil Spec Visual Calculator
 
 Electron desktop app (Coil Calculator) with extensive testing scaffolding.
 
-<img width="1176" height="726" alt="image" src="https://github.com/user-attachments/assets/2b9e7fb0-246a-45f5-aad8-a742bf4edbb2" />
+<img width="1280" height="640" alt="image" src="https://github.com/user-attachments/assets/66a786e7-b82a-4055-83fe-4d2ada6eaa53" />
 
 ## Stack
 
